@@ -14,7 +14,7 @@ Data Visualization
 Species-Level Clade Abundance
 Phylum-Level Clade Abundance
 Alpha Diversity Indices
-License
+
 
 **Overview**
 This pipeline automates the analysis of metatranscriptomic data from raw RNA-seq FASTQ files to taxonomic profiling and data visualization. It leverages tools like FastQC, Trimmomatic, STAR, and MetaPhlAn, along with R for visualizing results.
