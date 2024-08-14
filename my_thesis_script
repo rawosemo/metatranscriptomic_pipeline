@@ -1,0 +1,190 @@
+#!/bin/bash
+
+#tool directories
+METAPHLAN_DB_DIR="/mnt/data/metaphlan_db"
+GENOME_DIR="/mnt/data/hg38/star_idx/"
+TRIMMOMATIC_JAR="/home/rasaq/apps/Trimmomatic-0.39/trimmomatic-0.39.jar"
+ADAPTER_FILE="/home/rasaq/apps/Trimmomatic-0.39/adapters/TruSeq3-PE.fa"
+
+# directories
+RAW_DATA_DIR="/mnt/data/raw_data"
+TRIMMED_DATA_DIR="/mnt/data/trimmed"
+QC_DIR="/mnt/data/fastQC"
+ALIGN_DIR="/mnt/data/alignment"
+UNMAPPED_DIR="/mnt/data/unmapped"
+METAPHLAN_DIR="/mnt/data/metaphlan"
+LOG_DIR="/mnt/data/logs"
+
+# Create necessary directories if they do not exist
+mkdir -p $RAW_DATA_DIR $TRIMMED_DATA_DIR $QC_DIR $ALIGN_DIR $UNMAPPED_DIR $METAPHLAN_DIR $LOG_DIR
+
+# Function to check the exit status of the last executed command and exit if non-zero
+#If any command fails, the script exits immediately, preventing subsequent steps from running with potentially invalid inputs.
+check_status() {
+    if [ $? -ne 0 ]; then
+        echo "Error in $1. Exiting."
+        exit 1
+    fi
+}
+
+# Function to check if files matching a pattern exist
+#to verify that the necessary files are available. If the required files are not found, the script exits, avoiding errors from missing inputs.
+check_files_exist() {
+    files=$(ls $1 2> /dev/null)
+    if [ -z "$files" ]; then
+        echo "No files matching pattern '$1' found. Exiting."
+        exit 1
+    fi
+}
+
+# Quality control with fastQC
+echo "Starting quality control with fastQC..."
+check_files_exist "$RAW_DATA_DIR/*_1.fastq.gz"
+check_files_exist "$RAW_DATA_DIR/*_2.fastq.gz"
+for file in $RAW_DATA_DIR/*_1.fastq.gz; do
+    base=$(basename $file _1.fastq.gz)
+    fastqc $RAW_DATA_DIR/${base}_1.fastq.gz -o $QC_DIR
+    fastqc $RAW_DATA_DIR/${base}_2.fastq.gz -o $QC_DIR
+    check_status "fastQC"
+done
+echo "Quality control completed."
+
+# Trimming with trimmomatic
+echo "Starting trimming with trimmomatic..."
+check_files_exist "$RAW_DATA_DIR/*_1.fastq.gz"
+check_files_exist "$RAW_DATA_DIR/*_2.fastq.gz"
+for file in $RAW_DATA_DIR/*_1.fastq.gz; do
+    base=$(basename $file _1.fastq.gz)
+    java -jar $TRIMMOMATIC_JAR PE -phred33 \
+        $RAW_DATA_DIR/${base}_1.fastq.gz $RAW_DATA_DIR/${base}_2.fastq.gz \
+        $TRIMMED_DATA_DIR/${base}_1_paired_trimmed.fastq.gz $TRIMMED_DATA_DIR/${base}_1_unpaired_trimmed.fastq.gz \
+        $TRIMMED_DATA_DIR/${base}_2_paired_trimmed.fastq.gz $TRIMMED_DATA_DIR/${base}_2_unpaired_trimmed.fastq.gz \
+        ILLUMINACLIP:$ADAPTER_FILE:2:30:10 SLIDINGWINDOW:4:15 MINLEN:50 > $LOG_DIR/${base}_trimmomatic.log 2>&1
+    check_status "trimmomatic"
+done
+echo "Trimming completed."
+
+# Aligning trimmed reads to the human genome with STAR
+echo "Starting alignment with STAR..."
+check_files_exist "$TRIMMED_DATA_DIR/*_1_paired_trimmed.fastq.gz"
+check_files_exist "$TRIMMED_DATA_DIR/*_2_paired_trimmed.fastq.gz"
+for file in $TRIMMED_DATA_DIR/*_1_paired_trimmed.fastq.gz; do
+    base=$(basename $file _1_paired_trimmed.fastq.gz)
+    STAR --runThreadN 8 --genomeDir $GENOME_DIR --readFilesIn $TRIMMED_DATA_DIR/${base}_1_paired_trimmed.fastq.gz $TRIMMED_DATA_DIR/${base}_2_paired_trimmed.fastq.gz --readFilesCommand zcat --outFileNamePrefix $ALIGN_DIR/${base}_ --outSAMtype BAM Unsorted --outReadsUnmapped Fastx
+    check_status "STAR alignment"
+done
+echo "Alignment completed."
+
+# Rename unmapped reads and move them to the appropriate directory
+echo "Renaming and moving unmapped reads..."
+check_files_exist "$ALIGN_DIR/*_Unmapped.out.mate1"
+check_files_exist "$ALIGN_DIR/*_Unmapped.out.mate2"
+for file in $ALIGN_DIR/*_Unmapped.out.mate1; do
+    base=$(basename $file _Unmapped.out.mate1)
+    mv $ALIGN_DIR/${base}_Unmapped.out.mate1 $UNMAPPED_DIR/${base}_R1.fastq
+    check_status "moving ${base}_R1.fastq"
+    mv $ALIGN_DIR/${base}_Unmapped.out.mate2 $UNMAPPED_DIR/${base}_R2.fastq
+    check_status "moving ${base}_R2.fastq"
+done
+echo "Renaming and moving of unmapped reads completed."
+
+# Activate Metaphlan conda environment
+echo "Activating Metaphlan conda environment..."
+source $(conda info --base)/etc/profile.d/conda.sh
+conda activate mpa #mpa is the name of the conda environment where metaphlan is
+check_status "conda activate mpa"
+echo "Conda environment activated."
+
+# Metaphlan analysis
+echo "Starting Metaphlan analysis..."
+check_files_exist "$UNMAPPED_DIR/*_R1.fastq"
+check_files_exist "$UNMAPPED_DIR/*_R2.fastq"
+for file in $UNMAPPED_DIR/*_R1.fastq; do
+    base=$(basename $file _R1.fastq)
+    metaphlan $UNMAPPED_DIR/${base}_R1.fastq,$UNMAPPED_DIR/${base}_R2.fastq --input_type fastq --bowtie2db $METAPHLAN_DB_DIR --index latest --bowtie2out $METAPHLAN_DIR/${base}_bowtie2.bz2 -o $METAPHLAN_DIR/${base}_metaphlan.txt
+    check_status "Metaphlan analysis for ${base}"
+done
+echo "Metaphlan analysis completed."
+echo "you did it, Rasaq!!!"
+
+#Data visualization
+# Load necessary libraries
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(vegan)  
+
+# Read the clade abundance data
+clade_data <- read.table("C:/path/to/metaphlan output filess", header = TRUE, sep = "\t")
+
+# Filter and transform species-level clade data (excluding "t__" classification)
+species_data <- clade_data %>%
+  filter(grepl("s__", clade_name) & !grepl("t__", clade_name)) %>%
+  gather(key = "Sample", value = "Abundance", -clade_name) %>%
+  mutate(species = sub(".*s__", "", clade_name)) %>%
+  group_by(Sample, species) %>%
+  summarise(Abundance = sum(Abundance)) %>%
+  mutate(Abundance = Abundance / sum(Abundance) * 100)
+
+# Plot the stacked bar plot for species-level clades
+ggplot(species_data, aes(x = Sample, y = Abundance, fill = species)) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(title = "Normalized species-level clade abundance for SRP454674", x = "Sample", y = "Relative Abundance (%)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.text = element_text(size = 10),
+        legend.title = element_text(size = 10),
+        plot.title = element_text(size = 14),
+        axis.title = element_text(size = 12))
+
+# Filter and transform phylum-level clade data (focusing only on phylum)
+phylum_data <- clade_data %>%
+  filter(grepl("p__", clade_name) & !grepl("c__|o__|f__|g__|s__", clade_name)) %>%
+  gather(key = "Sample", value = "Abundance", -clade_name) %>%
+  mutate(phylum = sub(".*p__", "", clade_name)) %>%
+  group_by(Sample, phylum) %>%
+  summarise(Abundance = sum(Abundance)) %>%
+  mutate(Abundance = Abundance / sum(Abundance) * 100)
+
+# Plot the stacked bar plot for phylum-level clades
+ggplot(phylum_data, aes(x = Sample, y = Abundance, fill = phylum)) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(title = "Normalized phylum-level clade abundance for SRP454674", x = "Sample", y = "Relative Abundance (%)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.text = element_text(size = 10),
+        legend.title = element_text(size = 10),
+        plot.title = element_text(size = 14),
+        axis.title = element_text(size = 12))
+
+# Calculate alpha diversity indices
+manual_simpson <- species_data %>%
+  group_by(Sample) %>%
+  summarise(Simpson = sum((Abundance / 100)^2))
+
+alpha_diversity <- species_data %>%
+  group_by(Sample) %>%
+  summarise(Shannon = diversity(Abundance, index = "shannon"),
+            Observed = n()) %>%
+  left_join(manual_simpson, by = "Sample")
+
+print("Alpha diversity indices with manual Simpson calculation:")
+print(alpha_diversity)
+
+# Transform alpha diversity data to long format
+alpha_diversity_long <- alpha_diversity %>%
+  pivot_longer(cols = c(Shannon, Simpson, Observed), names_to = "Index", values_to = "Value") %>%
+  filter(!(Sample %in% c("uninfected_1", "uninfected_2", "uninfected_3") & Index == "Observed"))
+
+# Plot alpha diversity indices
+ggplot(alpha_diversity_long, aes(x = Sample, y = Value, fill = Index)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8)) +
+  labs(title = "Alpha diversity indices for SRP454674", x = "Samples", y = "Diversity index") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.text = element_text(size = 10),
+        
+        legend.title = element_text(size = 10),
+        plot.title = element_text(size = 14),
+        axis.title = element_text(size = 12)) +
+  scale_fill_manual(values = c("Shannon" = "blue", "Simpson" = "red", "Observed" = "green"))
